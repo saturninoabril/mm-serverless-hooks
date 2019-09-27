@@ -1,0 +1,40 @@
+service: mattermost-webhooks
+
+package:
+    individually: true
+
+provider:
+  name: aws
+  runtime: nodejs8.10
+  # profile: dev-aws
+  region: us-east-1
+
+functions:
+  getGithubQAReviews:
+    handler: src/github_get_qa_reviews.handler
+    timeout: 20
+    events:
+      # Run everyday at 6am UTC+0
+      - schedule:
+          name: scheduled-every-6am
+          description: 'This is scheduled to run every 6am UTC.'
+          rate: cron(0 6 * * ? *)
+          enabled: true
+
+  # githubWebhookListener:
+  #   handler: src/github_webhook.handler
+  #   timeout: 20
+  #   events:
+  #     - http:
+  #         path: github_webhook
+  #         method: post
+  #         cors: true
+  #     - throttle:
+  #         burstLimit: 100
+  #         rateLimit: 100
+
+plugins:
+    - serverless-offline
+    - serverless-dotenv-plugin
+    - serverless-offline-scheduler
+    
