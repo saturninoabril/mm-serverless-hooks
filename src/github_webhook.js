@@ -1,4 +1,5 @@
 const axios = require('axios');
+const Octokit = require('@octokit/rest');
 const crypto = require('crypto');
 const {Client} = require('pg');
 const format = require('pg-format');
@@ -94,16 +95,27 @@ function submitMessage(text) {
 function labeledTemplate(info) {
     let emoji = '';
     let tag = '';
+    let bySender = '';
     if (info.label === GITHUB_LABEL_QA_REVIEW) {
         tag = '#github_qa_review_request';
     } else if (info.label === GITHUB_LABEL_QA_REVIEW_DONE) {
         emoji = ':clap:';
         tag = '#github_qa_review_done';
+        bySender = `by ${info.sender}`;
     }
+
+    const {diffFiles, unitTestFiles, e2eTestFiles} = info;
+
+    const filesChanged = `File/s changed: ${diffFiles.length}`;
+    const unitTest = unitTestFiles.length > 0 ? `, Unit test: :white_check_mark:` : '';
+    const e2eTest = e2eTestFiles.length > 0 ? `, E2E test: :100:` : '';
+
     return `
 ##### ${emoji} [${info.title}](${info.html_url})
 
-[${info.repo}] ${tag} by ${info.sender}
+${filesChanged}${unitTest}${e2eTest}
+
+[${info.repo}] ${tag} ${bySender}
 `;
 }
 
@@ -150,7 +162,44 @@ function insertQuery(info, isRequested, isDone) {
     );
 }
 
+function getDiff(repo, pullNumber) {
+    const octokit = new Octokit({
+        auth: process.env.GITHUB_TOKEN,
+    });
+
+    return octokit.pulls
+        .get({
+            owner: process.env.GITHUB_OWNER,
+            repo: repo.split('/')[1],
+            pull_number: pullNumber,
+            mediaType: {
+              format: "diff"
+            }
+        })
+        .then((resp) => {
+            const diffFiles = resp.data.split('\n').filter(d => d.includes('diff --git')).map(d => d.split(' ')[3].substr(1));
+            const unitTestFiles = diffFiles.filter(d => d.includes('_test.go') || d.includes('storetest') || d.includes('.test.'));
+            const e2eTestFiles = diffFiles.filter(d => d.includes('_spec.'));
+
+            return {status: resp.status, data: resp.data, diffFiles, unitTestFiles, e2eTestFiles};
+        })
+        .catch((err) => {
+            console.log('Failed to get diff of pull request:', pullNumber);
+            return {error: err};
+        });
+}
+
 module.exports.default = (event, context, callback) => {
+    if (!event || !event.body) {
+        errMsg = "Invalid event";
+        console.log('NO EVENT: Must be valid event');
+        return callback(null, {
+            statusCode: 401,
+            headers: {'Content-Type': 'text/plain'},
+            body: errMsg,
+        });
+    }
+
     var errMsg;
     const token = process.env.GITHUB_WEBHOOK_SECRET;
     const headers = event.headers;
@@ -217,10 +266,6 @@ module.exports.default = (event, context, callback) => {
         (r) => `${process.env.GITHUB_OWNER}/${r}`,
     );
 
-    console.log('GITHUB_EVENT:', githubEvent);
-    console.log('REPO:', repo);
-    console.log('ACTION:', action);
-
     if (
         action === GITHUB_ACTION_LABELED &&
         githubEvent === GITHUB_EVENT_PULLS &&
@@ -236,18 +281,18 @@ module.exports.default = (event, context, callback) => {
         };
 
         const label = data.label.name;
-        console.log('LABEL:', label);
-        if (
-            [GITHUB_LABEL_QA_REVIEW, GITHUB_LABEL_QA_REVIEW_DONE].includes(
-                label,
-            )
-        ) {
-            const message = labeledTemplate({
-                ...info,
-                label,
-            });
+        if ([GITHUB_LABEL_QA_REVIEW, GITHUB_LABEL_QA_REVIEW_DONE].includes(label)) {
+            getDiff(repo, data.number).then(diffData => {
+                const message = labeledTemplate({
+                    ...info,
+                    label,
+                    diffFiles: diffData.diffFiles,
+                    unitTestFiles: diffData.unitTestFiles,
+                    e2eTestFiles: diffData.e2eTestFiles,
+                });
 
-            submitMessage(message);
+                submitMessage(message);
+            });
 
             if (process.env.DATABASE_CONNECTION_STRING) {
                 console.log('SUBMIT TO DB');
