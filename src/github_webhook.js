@@ -1,13 +1,26 @@
 const axios = require('axios');
-const Octokit = require('@octokit/rest');
+const {Octokit} = require('@octokit/rest');
 const crypto = require('crypto');
 const {Client} = require('pg');
 const format = require('pg-format');
 
 const GITHUB_EVENT_PULLS = 'pull_request';
 const GITHUB_ACTION_LABELED = 'labeled';
-const GITHUB_LABEL_QA_REVIEW = '2: QA Review';
+const GITHUB_ACTION_UNLABELED = 'unlabeled';
+const GITHUB_LABEL_QA_REVIEW = '3: QA Review';
 const GITHUB_LABEL_QA_REVIEW_DONE = 'QA Review Done';
+
+function isProd() {
+    return process.env.NODE_ENV === 'production';
+}
+
+const ghWatchedRepos = isProd() ? process.env.GITHUB_WATCHED_REPOS : process.env.GITHUB_WATCHED_REPOS_DEV;
+const ghToken = isProd() ? process.env.GITHUB_TOKEN : process.env.GITHUB_TOKEN_DEV;
+const ghWebhookSecret = isProd() ? process.env.GITHUB_WEBHOOK_SECRET : process.env.GITHUB_WEBHOOK_SECRET_DEV;
+const ghOwner = isProd() ? process.env.GITHUB_OWNER : process.env.GITHUB_OWNER_DEV;
+const mmIncomingWebhook = isProd()
+    ? process.env.MATTERMOST_INCOMING_WEBHOOK
+    : process.env.MATTERMOST_INCOMING_WEBHOOK_DEV;
 
 // Reuse DB connection
 if (process.env.DATABASE_CONNECTION_STRING && typeof client === 'undefined') {
@@ -20,51 +33,39 @@ if (process.env.DATABASE_CONNECTION_STRING && typeof client === 'undefined') {
 }
 
 function submitToDB(info, action, label, isDone) {
-    client.query(
-        `SELECT * FROM github_review WHERE html_url='${info.html_url}'`,
-        (err, res) => {
-            if (err) {
-                console.log('Failed to get data from the database');
-                return {err};
-            } else {
-                let prefixQuery = '';
-                if (res.rows && res.rows.length === 0) {
-                    saveToDB(info, true, isDone);
-                } else if (res.rows.length === 1) {
-                    if (
-                        action === GITHUB_ACTION_LABELED &&
-                        label === GITHUB_LABEL_QA_REVIEW
-                    ) {
-                        prefixQuery = 'is_requested=true';
-                    } else if (
-                        action === GITHUB_ACTION_LABELED &&
-                        label === GITHUB_LABEL_QA_REVIEW_DONE
-                    ) {
-                        prefixQuery = 'is_requested=true,is_done=true';
-                    }
-
-                    if (prefixQuery) {
-                        updateItemToDB(res.rows[0].id, prefixQuery);
-                    }
+    client.query(`SELECT * FROM github_review WHERE html_url='${info.html_url}'`, (err, res) => {
+        if (err) {
+            console.log('Failed to get data from the database');
+            return {err};
+        } else {
+            let prefixQuery = '';
+            if (res.rows && res.rows.length === 0) {
+                saveToDB(info, true, isDone);
+            } else if (res.rows.length === 1) {
+                if (action === GITHUB_ACTION_LABELED && label === GITHUB_LABEL_QA_REVIEW) {
+                    prefixQuery = 'is_requested=true';
+                } else if (action === GITHUB_ACTION_LABELED && label === GITHUB_LABEL_QA_REVIEW_DONE) {
+                    prefixQuery = 'is_requested=true,is_done=true';
                 }
-                return {data: res.rows};
+
+                if (prefixQuery) {
+                    updateItemToDB(res.rows[0].id, prefixQuery);
+                }
             }
-        },
-    );
+            return {data: res.rows};
+        }
+    });
 }
 
 function updateItemToDB(rowID, prefix) {
     const now = new Date().toUTCString();
-    client.query(
-        `UPDATE github_review SET ${prefix},updated_at='${now}' WHERE id='${rowID}'`,
-        (err, res) => {
-            if (err) {
-                console.log('Failed to update item into the database');
-            } else {
-                console.log('Successfully updated item into the database');
-            }
-        },
-    );
+    client.query(`UPDATE github_review SET ${prefix},updated_at='${now}' WHERE id='${rowID}'`, (err, res) => {
+        if (err) {
+            console.log('Failed to update item into the database');
+        } else {
+            console.log('Successfully updated item into the database');
+        }
+    });
 }
 
 function saveToDB(info, isRequested, isDone) {
@@ -80,7 +81,7 @@ function saveToDB(info, isRequested, isDone) {
 function submitMessage(text) {
     axios({
         method: 'post',
-        url: process.env.MATTERMOST_INCOMING_WEBHOOK,
+        url: mmIncomingWebhook,
         data: {text},
     })
         .then((resp) => {
@@ -120,27 +121,13 @@ ${filesChanged}${unitTest}${e2eTest}
 }
 
 function signRequestBody(key, body) {
-    return `sha1=${crypto
-        .createHmac('sha1', key)
-        .update(body, 'utf-8')
-        .digest('hex')}`;
+    return `sha1=${crypto.createHmac('sha1', key).update(body, 'utf-8').digest('hex')}`;
 }
 
 function insertQuery(info, isRequested, isDone) {
     const now = new Date().toUTCString();
     const data = [
-        [
-            info.event,
-            info.action,
-            info.repo,
-            info.sender,
-            info.title,
-            info.html_url,
-            isRequested,
-            isDone,
-            now,
-            now,
-        ],
+        [info.event, info.action, info.repo, info.sender, info.title, info.html_url, isRequested, isDone, now, now],
     ];
 
     return format(
@@ -164,24 +151,35 @@ function insertQuery(info, isRequested, isDone) {
 
 function getDiff(repo, pullNumber) {
     const octokit = new Octokit({
-        auth: process.env.GITHUB_TOKEN,
+        auth: ghToken,
     });
 
     return octokit.pulls
         .get({
-            owner: process.env.GITHUB_OWNER,
+            owner: ghOwner,
             repo: repo.split('/')[1],
             pull_number: pullNumber,
             mediaType: {
-              format: "diff"
-            }
+                format: 'diff',
+            },
         })
         .then((resp) => {
-            const diffFiles = resp.data.split('\n').filter(d => d.includes('diff --git')).map(d => d.split(' ')[3].substr(1));
-            const unitTestFiles = diffFiles.filter(d => d.includes('_test.go') || d.includes('storetest') || d.includes('.test.'));
-            const e2eTestFiles = diffFiles.filter(d => d.includes('_spec.'));
+            const diffFiles = resp.data
+                .split('\n')
+                .filter((d) => d.includes('diff --git'))
+                .map((d) => d.split(' ')[3].substr(1));
+            const unitTestFiles = diffFiles.filter(
+                (d) => d.includes('_test.go') || d.includes('storetest') || d.includes('.test.'),
+            );
+            const e2eTestFiles = diffFiles.filter((d) => d.includes('_spec.'));
 
-            return {status: resp.status, data: resp.data, diffFiles, unitTestFiles, e2eTestFiles};
+            return {
+                status: resp.status,
+                data: resp.data,
+                diffFiles,
+                unitTestFiles,
+                e2eTestFiles,
+            };
         })
         .catch((err) => {
             console.log('Failed to get diff of pull request:', pullNumber);
@@ -189,9 +187,9 @@ function getDiff(repo, pullNumber) {
         });
 }
 
-module.exports.default = (event, context, callback) => {
+module.exports.handler = (event, context, callback) => {
     if (!event || !event.body) {
-        errMsg = "Invalid event";
+        errMsg = 'Invalid event';
         console.log('NO EVENT: Must be valid event');
         return callback(null, {
             statusCode: 401,
@@ -201,14 +199,13 @@ module.exports.default = (event, context, callback) => {
     }
 
     var errMsg;
-    const token = process.env.GITHUB_WEBHOOK_SECRET;
     const headers = event.headers;
     const sig = headers['X-Hub-Signature'];
     const githubEvent = headers['X-GitHub-Event'];
     const id = headers['X-GitHub-Delivery'];
-    const calculatedSig = signRequestBody(token, event.body);
+    const calculatedSig = signRequestBody(ghWebhookSecret, event.body);
 
-    if (typeof token !== 'string') {
+    if (typeof ghWebhookSecret !== 'string') {
         errMsg = "Must provide a 'GITHUB_WEBHOOK_SECRET' env variable";
         console.log('NO TOKEN: Must provide a GITHUB_WEBHOOK_SECRET env variable');
         return callback(null, {
@@ -249,8 +246,7 @@ module.exports.default = (event, context, callback) => {
     }
 
     if (sig !== calculatedSig) {
-        errMsg =
-            "X-Hub-Signature incorrect. Github webhook token doesn't match";
+        errMsg = "X-Hub-Signature incorrect. Github webhook secret doesn't match";
         console.log('INVALID SIGNATURE:', errMsg);
         return callback(null, {
             statusCode: 401,
@@ -262,12 +258,12 @@ module.exports.default = (event, context, callback) => {
     const data = JSON.parse(event.body);
     const repo = data.repository.full_name;
     const action = data.action;
-    const repos = process.env.GITHUB_WATCHED_REPOS.split(',').map(
-        (r) => `${process.env.GITHUB_OWNER}/${r}`,
-    );
+    const repos = ghWatchedRepos.split(',').map((r) => `${ghOwner}/${r}`);
+
+    console.log('action:', action);
 
     if (
-        action === GITHUB_ACTION_LABELED &&
+        (action === GITHUB_ACTION_LABELED || action === GITHUB_ACTION_UNLABELED) &&
         githubEvent === GITHUB_EVENT_PULLS &&
         repos.includes(repo)
     ) {
@@ -282,7 +278,7 @@ module.exports.default = (event, context, callback) => {
 
         const label = data.label.name;
         if ([GITHUB_LABEL_QA_REVIEW, GITHUB_LABEL_QA_REVIEW_DONE].includes(label)) {
-            getDiff(repo, data.number).then(diffData => {
+            getDiff(repo, data.number).then((diffData) => {
                 const message = labeledTemplate({
                     ...info,
                     label,
@@ -297,12 +293,7 @@ module.exports.default = (event, context, callback) => {
             if (process.env.DATABASE_CONNECTION_STRING) {
                 console.log('SUBMIT TO DB');
                 // P2: will remove once DB is setup
-                submitToDB(
-                    info,
-                    action,
-                    label,
-                    label === GITHUB_LABEL_QA_REVIEW_DONE,
-                );
+                submitToDB(info, action, label, label === GITHUB_LABEL_QA_REVIEW_DONE);
             }
         }
     }

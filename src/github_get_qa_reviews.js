@@ -1,46 +1,26 @@
 const axios = require('axios');
-const Octokit = require('@octokit/rest');
+const {Octokit} = require('@octokit/rest');
 
-module.exports.handler = (event, context, callback) => {
-    const output = [];
-    process.env.GITHUB_WATCHED_REPOS.split(',').forEach((repo) => {
-        output.push(getPRs(repo));
-    });
+const ghWatchedRepos = isProd() ? process.env.GITHUB_WATCHED_REPOS : process.env.GITHUB_WATCHED_REPOS_DEV;
+const ghToken = isProd() ? process.env.GITHUB_TOKEN : process.env.GITHUB_TOKEN_DEV;
+const ghOwner = isProd() ? process.env.GITHUB_OWNER : process.env.GITHUB_OWNER_DEV;
+const ghQAUsers = isProd() ? process.env.GITHUB_QA_USERS : process.env.GITHUB_QA_USERS_DEV;
+const mmIncomingWebhook = isProd()
+    ? process.env.MATTERMOST_INCOMING_WEBHOOK
+    : process.env.MATTERMOST_INCOMING_WEBHOOK_DEV;
 
-    Promise.all(output).then((out) => {
-        out.forEach((prs) => {
-            if (prs && prs.data) {
-                const qaLabelled = groupPRsPerQA(prs.data, prs.repo);
-
-                const text = generateTemplate(
-                    prs.repo,
-                    prs.data.length,
-                    qaLabelled,
-                );
-
-                submitMessage(text);
-            }
-        });
-    });
-
-    const response = {
-        statusCode: 200,
-        body: JSON.stringify({
-            input: {message: 'Successfully posted'},
-        }),
-    };
-
-    return callback(null, response);
-};
+function isProd() {
+    return process.env.NODE_ENV === 'production';
+}
 
 function getPullRequests(repo) {
     const octokit = new Octokit({
-        auth: process.env.GITHUB_TOKEN,
+        auth: ghToken,
     });
 
     return octokit.pulls
         .list({
-            owner: process.env.GITHUB_OWNER,
+            owner: ghOwner,
             repo,
             state: 'open',
             per_page: 100,
@@ -77,7 +57,7 @@ function getPRReviewer(pr) {
 function getQAReviewer(reviewers = []) {
     const qaReviewer = [];
     reviewers.forEach((rev) => {
-        if (process.env.GITHUB_QA_USERS.includes(rev)) {
+        if (ghQAUsers.includes(rev)) {
             qaReviewer.push(rev);
         }
     });
@@ -86,7 +66,7 @@ function getQAReviewer(reviewers = []) {
 }
 
 function groupPRsPerQA(PRs = [], repo) {
-    return PRs.filter((pr) => getPRLabel(pr).includes('2: QA Review'))
+    return PRs.filter((pr) => getPRLabel(pr).includes('3: QA Review'))
         .map((pr) => {
             const reviewers = getPRReviewer(pr);
             return {
@@ -120,9 +100,9 @@ function generateTemplate(repo, totalPR, qaPRs) {
     const lines = [];
     qaPRs.forEach((pr) => {
         const milestone = pr.milestone ? `[${pr.milestone}]` : '';
-        const line = `- (${
-            pr.qa_reviewer.length > 0 ? pr.qa_reviewer.join(', ') : ':point_up:'
-        }) [${pr.title}](${pr.url}) ${milestone} `;
+        const line = `- (${pr.qa_reviewer.length > 0 ? pr.qa_reviewer.join(', ') : ':point_up:'}) [${pr.title}](${
+            pr.url
+        }) ${milestone} `;
         lines.push(line);
     });
 
@@ -143,7 +123,7 @@ ${lines.join('\n')}
 function submitMessage(text) {
     axios({
         method: 'post',
-        url: process.env.MATTERMOST_INCOMING_WEBHOOK,
+        url: mmIncomingWebhook,
         data: {text},
     })
         .then((resp) => {
@@ -153,3 +133,31 @@ function submitMessage(text) {
             console.log('Failed to sent to Mattermost');
         });
 }
+
+module.exports.handler = (event, context, callback) => {
+    const output = [];
+    ghWatchedRepos.split(',').forEach((repo) => {
+        output.push(getPRs(repo));
+    });
+
+    Promise.all(output).then((out) => {
+        out.forEach((prs) => {
+            if (prs && prs.data) {
+                const qaLabelled = groupPRsPerQA(prs.data, prs.repo);
+
+                const text = generateTemplate(prs.repo, prs.data.length, qaLabelled);
+
+                submitMessage(text);
+            }
+        });
+    });
+
+    const response = {
+        statusCode: 200,
+        body: JSON.stringify({
+            input: {message: 'Successfully posted'},
+        }),
+    };
+
+    return callback(null, response);
+};

@@ -6,7 +6,7 @@ package:
 provider:
   name: aws
   runtime: nodejs12.x
-  # profile: dev-aws
+  profile: mm-dev
   region: us-east-1
 
 custom:
@@ -20,15 +20,15 @@ functions:
     handler: src/github_get_qa_reviews.handler
     timeout: 20
     events:
-      # Run everyday at 6am UTC+0
+      # Run everyday at UTC+0
       - schedule:
           name: scheduled-every-6am
-          description: 'This is scheduled to run every 6am UTC.'
-          rate: cron(0 6 * * ? *)
+          description: 'This is scheduled to run every 4:30pm UTC.'
+          rate: cron(30 16 * * ? *)
           enabled: true
 
   githubWebhookListener:
-    handler: src/github_webhook.default
+    handler: src/github_webhook.handler
     timeout: 20
     events:
       - http:
