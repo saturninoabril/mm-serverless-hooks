@@ -20,7 +20,7 @@
     "babel-loader": "8.1.0",
     "nodemon": "2.0.4",
     "prettier": "2.0.5",
-    "serverless": "1.71.3",
+    "serverless": "3.25.1",
     "serverless-dotenv-plugin": "2.4.2",
     "serverless-offline": "6.1.7",
     "serverless-offline-scheduler": "0.4.2",
